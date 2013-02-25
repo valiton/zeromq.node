@@ -20,7 +20,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-// test
+
 #include <v8.h>
 #include <node.h>
 #include <node_version.h>
@@ -32,6 +32,9 @@
 #include <string.h>
 #include <errno.h>
 #include <stdexcept>
+//#include <iostream.h>
+
+
 
 #ifdef _WIN32
 #define snprintf _snprintf_s
@@ -102,6 +105,7 @@ namespace zmq {
 
       class OutgoingMessage;
       static Handle<Value> Send(const Arguments &args);
+      static Handle<Value> SendWithHWM(const Arguments &args);
 
       void Close();
       static Handle<Value> Close(const Arguments &args);
@@ -158,6 +162,8 @@ namespace zmq {
   Handle<Value>
   Context::New(const Arguments& args) {
     HandleScope scope;
+
+    //  cout << "### New\n";
 
     assert(args.IsConstructCall());
 
@@ -225,7 +231,7 @@ namespace zmq {
     NODE_SET_PROTOTYPE_METHOD(t, "getsockopt", GetSockOpt);
     NODE_SET_PROTOTYPE_METHOD(t, "setsockopt", SetSockOpt);
     NODE_SET_PROTOTYPE_METHOD(t, "recv", Recv);
-    NODE_SET_PROTOTYPE_METHOD(t, "send", Send);
+    NODE_SET_PROTOTYPE_METHOD(t, "send", SendWithHWM);
     NODE_SET_PROTOTYPE_METHOD(t, "close", Close);
 
     target->Set(String::NewSymbol("Socket"), t->GetFunction());
@@ -376,6 +382,10 @@ namespace zmq {
     size_t length = Buffer::Length(buf);
     if (zmq_setsockopt(socket_, option, Buffer::Data(buf), length) < 0)
       return ThrowException(ExceptionFromError());
+
+    //int myrate = 2000;
+    //zmq_setsockopt(socket_, ZMQ_RATE, &myrate, sizeof(myrate));
+
     return Undefined();
   }
 
@@ -393,6 +403,8 @@ namespace zmq {
     // FIXME: How to handle ZMQ_FD on Windows?
     switch (option) {
       case 1:
+      case 23:
+      case 24:
       case ZMQ_AFFINITY:
       case ZMQ_SNDBUF:
       case ZMQ_RCVBUF:
@@ -404,14 +416,9 @@ namespace zmq {
       case 10:
         return socket->GetSockOpt<int64_t>(option);
       case ZMQ_IDENTITY:
-#ifdef ZMQ_LAST_ENDPOINT
-      case ZMQ_LAST_ENDPOINT:
-#endif
         return socket->GetSockOpt<char*>(option);
       case ZMQ_EVENTS:
         return socket->GetSockOpt<uint32_t>(option);
-      case 23: /* ZMQ_SNDHWM */
-      case 24: /* ZMQ_RCVHWM */
       case ZMQ_FD:
       case ZMQ_TYPE:
       case ZMQ_LINGER:
@@ -429,6 +436,7 @@ namespace zmq {
   }
 
   Handle<Value> Socket::SetSockOpt(const Arguments &args) {
+
     if (args.Length() != 2)
       return ThrowException(Exception::Error(
         String::New("Must pass an option and a value")));
@@ -438,9 +446,15 @@ namespace zmq {
     int64_t option = args[0]->ToInteger()->Value();
 
     GET_SOCKET(args);
+    //int myrate = 2000;
 
+
+// cout << "##### SetSockOpt. option" << option << "\n";
     switch (option) {
+      case 23:
+        return socket->SetSockOpt<int>(ZMQ_SNDHWM, args[1]);
       case 1:
+      case 24:
       case ZMQ_AFFINITY:
       case ZMQ_SNDBUF:
       case ZMQ_RCVBUF:
@@ -450,8 +464,8 @@ namespace zmq {
       case ZMQ_RECOVERY_IVL:
       case 10:
         return socket->SetSockOpt<int64_t>(option, args[1]);
-      case 23: /* ZMQ_SNDHWM */
-      case 24: /* ZMQ_RCVHWM */
+        //worker->setsockopt (ZMQ_LINGER, &linger, sizeof (linger));
+        //zmq_setsockopt(socket->socket_, ZMQ_RATE, &myrate, sizeof(myrate));
       case ZMQ_IDENTITY:
       case ZMQ_SUBSCRIBE:
       case ZMQ_UNSUBSCRIBE:
@@ -512,10 +526,7 @@ namespace zmq {
     BindState* state = new BindState(socket, cb, addr);
     uv_work_t* req = new uv_work_t;
     req->data = state;
-    uv_queue_work(uv_default_loop(),
-                  req,
-                  UV_BindAsync,
-                  (uv_after_work_cb)UV_BindAsyncAfter);
+    uv_queue_work(uv_default_loop(), req, UV_BindAsync, UV_BindAsyncAfter);
     socket->state_ = STATE_BUSY;
 
     return Undefined();
@@ -745,12 +756,41 @@ namespace zmq {
     BufferReference* bufref_;
   };
 
+
+  Handle<Value> Socket::SendWithHWM(const Arguments &args) {
+    HandleScope scope;
+    int result;
+
+    GET_SOCKET(args);
+
+    zmq_msg_t msg;
+    Local<Object> buf = args[0]->ToObject();
+    size_t len = Buffer::Length(buf);
+    int res = zmq_msg_init_size(&msg, len);
+    if (res != 0)
+      return ThrowException(ExceptionFromError());
+
+    char * cp = (char *)zmq_msg_data(&msg);
+    const char * dat = Buffer::Data(buf);
+    std::copy(dat, dat + len, cp);
+
+    if ((result = zmq_send (socket->socket_, cp, len, ZMQ_DONTWAIT)) < 0) {
+      // cout << "ErrorCode:" << ErrorMessage() << "\n";
+    }
+
+    return scope.Close(Number::New(result));
+  }
+
+
   // WARNING: the buffer passed here will be kept alive
   // until zmq_send completes, possibly on another thread.
   // Do not modify or reuse any buffer passed to send.
   // This is bad, but allows us to send without copying.
   Handle<Value> Socket::Send(const Arguments &args) {
     HandleScope scope;
+
+    //cout << "### Send1\n";
+    Local<Number> result2;
 
     int argc = args.Length();
     if (argc != 1 && argc != 2)
@@ -787,11 +827,21 @@ namespace zmq {
     std::copy(dat, dat + len, cp);
 
     #if ZMQ_VERSION_MAJOR == 2
+      cout << "sending flags v2:" << flags << "\n";
       if (zmq_send(socket->socket_, &msg, flags) < 0)
         return ThrowException(ExceptionFromError());
     #else
-      if (zmq_sendmsg(socket->socket_, &msg, flags) < 0)
-        return ThrowException(ExceptionFromError());
+      //cout << "sending flags v3:" << flags << "\n";
+      signed int result;
+      int rc = zmq_send (socket->socket_, cp, len, flags);
+      if (rc < 0) {
+      //if (result = zmq_sendmsg(socket->socket_, &msg, flags) < 0)
+        //cout << "ErrorCode:" << ErrorMessage() << "\n";
+        //return ThrowException(ExceptionFromError());
+        result2 = Integer::New(result);
+        return scope.Close(result2);
+        //return  Number::New(result);
+      }
     #endif
 #endif // zero copy / copying version
 
@@ -851,10 +901,6 @@ namespace zmq {
 
     NODE_DEFINE_CONSTANT(target, ZMQ_PUB);
     NODE_DEFINE_CONSTANT(target, ZMQ_SUB);
-    #if ZMQ_VERSION_MAJOR == 3
-    NODE_DEFINE_CONSTANT(target, ZMQ_XPUB);
-    NODE_DEFINE_CONSTANT(target, ZMQ_XSUB);
-    #endif
     NODE_DEFINE_CONSTANT(target, ZMQ_REQ);
     NODE_DEFINE_CONSTANT(target, ZMQ_XREQ);
     NODE_DEFINE_CONSTANT(target, ZMQ_REP);
@@ -868,17 +914,13 @@ namespace zmq {
     #if ZMQ_VERSION_MAJOR == 2
     NODE_DEFINE_CONSTANT(target, ZMQ_HWM);
     NODE_DEFINE_CONSTANT(target, ZMQ_SWAP);
+    #error "UNEXPECTED VERSION"
     #else
     NODE_DEFINE_CONSTANT(target, ZMQ_SNDHWM);
     NODE_DEFINE_CONSTANT(target, ZMQ_RCVHWM);
     #endif
     NODE_DEFINE_CONSTANT(target, ZMQ_AFFINITY);
     NODE_DEFINE_CONSTANT(target, ZMQ_IDENTITY);
-
-    #ifdef ZMQ_LAST_ENDPOINT
-    NODE_DEFINE_CONSTANT(target, ZMQ_LAST_ENDPOINT);
-    #endif
-
     NODE_DEFINE_CONSTANT(target, ZMQ_SUBSCRIBE);
     NODE_DEFINE_CONSTANT(target, ZMQ_UNSUBSCRIBE);
     NODE_DEFINE_CONSTANT(target, ZMQ_RATE);
