@@ -6,8 +6,8 @@
 
 var cluster = require('cluster');
 var zmq = require('../');
-//var port = 'tcp://127.0.0.1:12345';
-var port = 'inproc://a';
+var port = 'tcp://127.0.0.1:12345';
+//var port = 'inproc://a';
 
 var pullcount = 0;
 
