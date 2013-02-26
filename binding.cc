@@ -307,6 +307,10 @@ namespace zmq {
     socket_ = zmq_socket(context->context_, type);
     state_ = STATE_READY;
 
+    // hardcoded ZMQ_RATE
+    int myrate = 20000;
+    zmq_setsockopt(socket_, ZMQ_RATE, &myrate, sizeof(myrate));
+
     poll_handle_ = new uv_poll_t;
 
     poll_handle_->data = this;
